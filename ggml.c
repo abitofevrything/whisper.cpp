@@ -81,6 +81,7 @@ typedef void* thread_ret_t;
 
 #define GGML_DEBUG 0
 #define GGML_GELU_FP16
+#define GGML_SOFT_MAX_UNROLL 4
 
 #if UINTPTR_MAX == 0xFFFFFFFF
     #define GGML_MEM_ALIGN 4
@@ -1039,7 +1040,30 @@ inline static void ggml_vec_gelu_f32(const int n, float * y, const float * x) {
 }
 #endif
 
-inline static void ggml_vec_sum_f32     (const int n, float * s, const float * x) { ggml_float sum = 0.0; for (int i = 0; i < n; ++i) sum += x[i]; *s += sum; }
+inline static void ggml_vec_sum_f32(const int n, float * s, const float * x) {
+#ifndef GGML_USE_ACCELERATE
+    ggml_float sum = 0.0;
+    for (int i = 0; i < n; ++i) {
+        sum += x[i];
+        *s += sum;
+    }
+#else
+    vDSP_sve(x, 1, s, n);
+#endif
+}
+
+inline static void ggml_vec_max_f32(const int n, float * s, const float * x) {
+#ifndef GGML_USE_ACCELERATE
+    ggml_float max = -INFINITY;
+    for (int i = 0; i < n; ++i) {
+        max = MAX(max, x[i]);
+    }
+    *s = max;
+#else
+    vDSP_maxv(x, 1, s, n);
+#endif
+}
+
 inline static void ggml_vec_norm_inv_f32(const int n, float * s, const float * x) { ggml_vec_norm_f32(n, s, x); *s = 1./(*s); }
 
 //
@@ -1293,25 +1317,25 @@ size_t ggml_element_size(const struct ggml_tensor * tensor) {
     return GGML_TYPE_SIZE[tensor->type];
 }
 
-bool ggml_is_scalar(const struct ggml_tensor * tensor) {
+static inline bool ggml_is_scalar(const struct ggml_tensor * tensor) {
     static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
 
     return tensor->ne[0] == 1 && tensor->ne[1] == 1 && tensor->ne[2] == 1 && tensor->ne[3] == 1;
 }
 
-bool ggml_is_vector(const struct ggml_tensor * tensor) {
+static inline bool ggml_is_vector(const struct ggml_tensor * tensor) {
     static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
 
     return tensor->ne[1] == 1 && tensor->ne[2] == 1 && tensor->ne[3] == 1;
 }
 
-bool ggml_is_matrix(const struct ggml_tensor * tensor) {
+static inline bool ggml_is_matrix(const struct ggml_tensor * tensor) {
     static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
 
     return tensor->ne[2] == 1 && tensor->ne[3] == 1;
 }
 
-bool ggml_can_mul_mat(const struct ggml_tensor * t0, const struct ggml_tensor * t1) {
+static inline bool ggml_can_mul_mat(const struct ggml_tensor * t0, const struct ggml_tensor * t1) {
     static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
 
     return
@@ -1320,7 +1344,7 @@ bool ggml_can_mul_mat(const struct ggml_tensor * t0, const struct ggml_tensor * 
         (t0->ne[3]  == t1->ne[3]);
 }
 
-bool ggml_is_contiguous(const struct ggml_tensor * tensor) {
+static inline bool ggml_is_contiguous(const struct ggml_tensor * tensor) {
     static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
 
     return
@@ -1330,7 +1354,7 @@ bool ggml_is_contiguous(const struct ggml_tensor * tensor) {
         tensor->nb[3] == tensor->nb[2]*tensor->ne[2];
 }
 
-bool ggml_is_padded_1d(const struct ggml_tensor * tensor) {
+static inline bool ggml_is_padded_1d(const struct ggml_tensor * tensor) {
     static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
 
     return
@@ -1339,7 +1363,7 @@ bool ggml_is_padded_1d(const struct ggml_tensor * tensor) {
         tensor->nb[3] == tensor->nb[2]*tensor->ne[2];
 }
 
-bool ggml_are_same_shape(const struct ggml_tensor * t0, const struct ggml_tensor * t1) {
+static inline bool ggml_are_same_shape(const struct ggml_tensor * t0, const struct ggml_tensor * t1) {
     static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
 
     return
@@ -1350,7 +1374,7 @@ bool ggml_are_same_shape(const struct ggml_tensor * t0, const struct ggml_tensor
 }
 
 // check if t1 can be represented as a repeatition of t0
-bool ggml_can_repeat(const struct ggml_tensor * t0, const struct ggml_tensor * t1) {
+static inline bool ggml_can_repeat(const struct ggml_tensor * t0, const struct ggml_tensor * t1) {
     static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
 
     return
@@ -1360,12 +1384,18 @@ bool ggml_can_repeat(const struct ggml_tensor * t0, const struct ggml_tensor * t
         (t1->ne[3]%t0->ne[3] == 0);
 }
 
-int ggml_up32(int n) {
+static inline int ggml_up32(int n) {
     return (n + 31) & ~31;
 }
 
-int ggml_up64(int n) {
+static inline int ggml_up64(int n) {
     return (n + 63) & ~63;
+}
+
+static inline int ggml_up(int n, int m) {
+    // assert m is a power of 2
+    GGML_ASSERT((m & (m - 1)) == 0);
+    return (n + m - 1) & ~(m - 1);
 }
 
 // assert that pointer is aligned to GGML_MEM_ALIGN
@@ -1404,7 +1434,7 @@ struct ggml_context * ggml_init(struct ggml_init_params params) {
             const uint64_t t_start = ggml_time_us(); UNUSED(t_start);
 
             g_state = (struct ggml_state) {
-                /*.contexts =*/ { 0 },
+                /*.contexts =*/ { { 0 } },
             };
 
             for (int i = 0; i < GGML_MAX_CONTEXTS; ++i) {
@@ -5071,21 +5101,19 @@ static void ggml_compute_forward_soft_max_f32(
 #endif
 
         float max = -INFINITY;
-        for (int i = 0; i < nc; i++) {
-            max = MAX(max, p[i]);
-        }
+        ggml_vec_max_f32(nc, &max, p);
 
         ggml_float sum = 0.0;
 
-        uint16_t ss;
+        uint16_t scvt;
         for (int i = 0; i < nc; i++) {
             if (p[i] == -INFINITY) {
-                p[i] = 0.0;
+                p[i] = 0.0f;
             } else {
                 //const float val = (p[i] == -INFINITY) ? 0.0 : exp(p[i] - max);
                 ggml_fp16_t s = GGML_FP32_TO_FP16(p[i] - max);
-                memcpy(&ss, &s, sizeof(ss));
-                const float val = GGML_FP16_TO_FP32(table_exp_f16[ss]);
+                memcpy(&scvt, &s, sizeof(scvt));
+                const float val = GGML_FP16_TO_FP32(table_exp_f16[scvt]);
                 sum += val;
                 p[i] = val;
             }
@@ -5797,6 +5825,8 @@ static void ggml_compute_forward_flash_attn_f32(
     const int P = nek1 - N;
     const int M = P + N;
 
+    const int Mup = ggml_up(M, GGML_SOFT_MAX_UNROLL);
+
     GGML_ASSERT(ne0 == D);
     GGML_ASSERT(ne1 == N);
     GGML_ASSERT(P >= 0);
@@ -5849,7 +5879,11 @@ static void ggml_compute_forward_flash_attn_f32(
         const int iq2 = (ir - iq3*neq2*neq1)/neq1;
         const int iq1 = (ir - iq3*neq2*neq1 - iq2*neq1);
 
-        float * S = (float *) params->wdata + ith*(M + CACHE_LINE_SIZE_F32);
+        float * S = (float *) params->wdata + ith*(Mup + CACHE_LINE_SIZE_F32);
+
+        for (int i = M; i < Mup; ++i) {
+            S[i] = -INFINITY;
+        }
 
         for (int ic = 0; ic < nek1; ++ic) {
             // k indices
@@ -5880,30 +5914,50 @@ static void ggml_compute_forward_flash_attn_f32(
         // softmax
         {
             float max = -INFINITY;
-            for (int i = 0; i < M; i++) {
-                max = MAX(max, S[i]);
-            }
+            ggml_vec_max_f32(M, &max, S);
 
-            ggml_float sum = 0.0;
+            float sum = 0.0f;
+            {
+#ifndef GGML_USE_ACCELERATE
+                uint16_t   scvt[GGML_SOFT_MAX_UNROLL];
+                ggml_float sump[GGML_SOFT_MAX_UNROLL] = { 0.0 };
 
-            uint16_t ss;
-            for (int i = 0; i < M; i++) {
-                if (S[i] == -INFINITY) {
-                    S[i] = 0.0;
-                } else {
-                    //const float val = (S[i] == -INFINITY) ? 0.0 : exp(S[i] - max);
-                    ggml_fp16_t s = GGML_FP32_TO_FP16(S[i] - max);
-                    memcpy(&ss, &s, sizeof(ss));
-                    const float val = GGML_FP16_TO_FP32(table_exp_f16[ss]);
-                    sum += val;
-                    S[i] = val;
+                for (int i = 0; i < Mup; i += GGML_SOFT_MAX_UNROLL) {
+                    float * SS = S + i;
+
+                    for (int j = 0; j < GGML_SOFT_MAX_UNROLL; ++j) {
+                        if (SS[j] == -INFINITY) {
+                            SS[j] = 0.0f;
+                        } else {
+                            ggml_fp16_t s = GGML_FP32_TO_FP16(SS[j] - max);
+                            memcpy(&scvt[j], &s, sizeof(uint16_t));
+                            const float val = GGML_FP16_TO_FP32(table_exp_f16[scvt[j]]);
+                            sump[j] += val;
+                            SS[j] = val;
+                        }
+                    }
                 }
+
+                for (int i = 0; i < GGML_SOFT_MAX_UNROLL; i++) {
+                    sum += sump[i];
+                }
+#else
+                vvexpf(S, S, &Mup);
+                ggml_vec_sum_f32(Mup, &sum, S);
+#endif
             }
 
             assert(sum > 0.0f);
 
             sum = 1.0/sum;
             ggml_vec_scale_f32(M, S, sum);
+
+#ifndef NDEBUG
+            for (int i = 0; i < M; ++i) {
+                assert(!isnan(S[i]));
+                assert(!isinf(S[i]));
+            }
+#endif
         }
 
         for (int ic = 0; ic < nev1; ++ic) {
@@ -5978,6 +6032,8 @@ static void ggml_compute_forward_flash_attn_f16(
     const int P = nek1 - N;
     const int M = P + N;
 
+    const int Mup = ggml_up(M, GGML_SOFT_MAX_UNROLL);
+
     GGML_ASSERT(ne0 == D);
     GGML_ASSERT(ne1 == N);
     GGML_ASSERT(P >= 0);
@@ -6030,7 +6086,11 @@ static void ggml_compute_forward_flash_attn_f16(
         const int iq2 = (ir - iq3*neq2*neq1)/neq1;
         const int iq1 = (ir - iq3*neq2*neq1 - iq2*neq1);
 
-        float * S = (float *) params->wdata + ith*(2*M + CACHE_LINE_SIZE_F32);
+        float * S = (float *) params->wdata + ith*(2*Mup + CACHE_LINE_SIZE_F32);
+
+        for (int i = M; i < Mup; ++i) {
+            S[i] = -INFINITY;
+        }
 
         for (int ic = 0; ic < nek1; ++ic) {
             // k indices
@@ -6061,30 +6121,50 @@ static void ggml_compute_forward_flash_attn_f16(
         // softmax
         {
             float max = -INFINITY;
-            for (int i = 0; i < M; i++) {
-                max = MAX(max, S[i]);
-            }
+            ggml_vec_max_f32(M, &max, S);
 
-            ggml_float sum = 0.0;
+            float sum = 0.0f;
+            {
+#ifndef GGML_USE_ACCELERATE
+                uint16_t   scvt[GGML_SOFT_MAX_UNROLL];
+                ggml_float sump[GGML_SOFT_MAX_UNROLL] = { 0.0 };
 
-            uint16_t ss;
-            for (int i = 0; i < M; i++) {
-                if (S[i] == -INFINITY) {
-                    S[i] = 0.0;
-                } else {
-                    //const float val = (S[i] == -INFINITY) ? 0.0 : exp(S[i] - max);
-                    ggml_fp16_t s = GGML_FP32_TO_FP16(S[i] - max);
-                    memcpy(&ss, &s, sizeof(ss));
-                    const float val = GGML_FP16_TO_FP32(table_exp_f16[ss]);
-                    sum += val;
-                    S[i] = val;
+                for (int i = 0; i < Mup; i += GGML_SOFT_MAX_UNROLL) {
+                    float * SS = S + i;
+
+                    for (int j = 0; j < GGML_SOFT_MAX_UNROLL; ++j) {
+                        if (SS[j] == -INFINITY) {
+                            SS[j] = 0.0f;
+                        } else {
+                            ggml_fp16_t s = GGML_FP32_TO_FP16(SS[j] - max);
+                            memcpy(&scvt[j], &s, sizeof(uint16_t));
+                            const float val = GGML_FP16_TO_FP32(table_exp_f16[scvt[j]]);
+                            sump[j] += val;
+                            SS[j] = val;
+                        }
+                    }
                 }
+
+                for (int i = 0; i < GGML_SOFT_MAX_UNROLL; i++) {
+                    sum += sump[i];
+                }
+#else
+                vvexpf(S, S, &Mup);
+                ggml_vec_sum_f32(Mup, &sum, S);
+#endif
             }
 
             assert(sum > 0.0f);
 
             sum = 1.0/sum;
             ggml_vec_scale_f32(M, S, sum);
+
+#ifndef NDEBUG
+            for (int i = 0; i < M; ++i) {
+                assert(!isnan(S[i]));
+                assert(!isinf(S[i]));
+            }
+#endif
         }
 
         ggml_fp16_t * S16 = (ggml_fp16_t *) ((float *) params->wdata + ith*(2*M + CACHE_LINE_SIZE_F32) + M);
@@ -7165,14 +7245,16 @@ void ggml_graph_compute(struct ggml_context * ctx, struct ggml_cgraph * cgraph) 
 
                         size_t cur = 0;
 
+                        const int ne11 = ggml_up(node->src1->ne[1], GGML_SOFT_MAX_UNROLL);
+
                         if (node->src1->type == GGML_TYPE_F32) {
-                            cur  = sizeof(float)*node->src1->ne[1]*node->n_tasks; // TODO: this can become (n_tasks-1)
-                            cur += sizeof(float)*node->src1->ne[1]*node->n_tasks; // this is overestimated by x2
+                            cur  = sizeof(float)*ne11*node->n_tasks; // TODO: this can become (n_tasks-1)
+                            cur += sizeof(float)*ne11*node->n_tasks; // this is overestimated by x2
                         }
 
                         if (node->src1->type == GGML_TYPE_F16) {
-                            cur  = sizeof(float)*node->src1->ne[1]*node->n_tasks; // TODO: this can become (n_tasks-1)
-                            cur += sizeof(float)*node->src1->ne[1]*node->n_tasks; // this is overestimated by x2
+                            cur  = sizeof(float)*ne11*node->n_tasks; // TODO: this can become (n_tasks-1)
+                            cur += sizeof(float)*ne11*node->n_tasks; // this is overestimated by x2
                         }
 
                         work_size = MAX(work_size, cur);
