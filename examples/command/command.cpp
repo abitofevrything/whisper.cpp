@@ -781,7 +781,7 @@ int always_prompt_transcription(struct whisper_context * ctx, audio_async & audi
                 std::string prompt;
                 std::string command;
 
-                for (int i = 0; i < words.size(); ++i) {
+                for (int i = 0; i < (int) words.size(); ++i) {
                     if (i < k_prompt_length) {
                         prompt += words[i] + " ";
                     } else {
@@ -931,7 +931,7 @@ int main(int argc, char ** argv) {
 
     // whisper init
 
-    struct whisper_context * ctx = whisper_init(params.model.c_str());
+    struct whisper_context * ctx = whisper_init_from_file(params.model.c_str());
 
     // print some info about the processing
     {
