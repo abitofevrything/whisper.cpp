@@ -554,13 +554,29 @@ static inline float __avx_f32x8_reduce(__m256 v) {
 #define GGML_F16_VEC_FMA    GGML_F32x4_FMA
 #define GGML_F16_VEC_REDUCE GGML_F32x4_REDUCE
 // Use vec_xl, not vec_ld, in case the load address is not aligned.
-// TODO: parameter i no longer exists as SIMD is done on variables, not arrays
-#define GGML_F16_VEC_LOAD(p, i) (i & 0x1) ?                   \
-  vec_extract_fp32_from_shorth(vec_xl(0, p - GGML_F16_EPR)) : \
-  vec_extract_fp32_from_shortl(vec_xl(0, p))
-#define GGML_F16_VEC_STORE(p, r, i)                                      \
-  if (i & 0x1)                                                           \
-    vec_xst(vec_pack_to_short_fp32(r[i], r[i - 1]), 0, p - GGML_F16_EPR)
+inline static vector float __power9_f16_vec_load(const ggml_fp16_t *p) {
+    float tmp[4];
+
+    tmp[0] = GGML_FP16_TO_FP32(p[0]);
+    tmp[1] = GGML_FP16_TO_FP32(p[1]);
+    tmp[2] = GGML_FP16_TO_FP32(p[2]);
+    tmp[3] = GGML_FP16_TO_FP32(p[3]);
+
+    return vec_xl(0, tmp);
+}
+#define GGML_F16_VEC_LOAD __power9_f16_vec_load
+
+inline static void __power9_f16_vec_store(const ggml_fp16_t *p, vector float x) {
+    float tmp[4];
+
+    vec_xst(x, 0, tmp);
+
+    p[0] = GGML_FP32_TO_FP16(tmp[0]);
+    p[1] = GGML_FP32_TO_FP16(tmp[1]);
+    p[2] = GGML_FP32_TO_FP16(tmp[2]);
+    p[3] = GGML_FP32_TO_FP16(tmp[3]);
+}
+#define GGML_F16_VEC_STORE __power9_f16_vec_store
 
 #elif defined(__wasm_simd128__)
 
