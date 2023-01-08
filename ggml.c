@@ -578,7 +578,7 @@ static inline float __avx_f32x8_reduce(__m256 v) {
 #define GGML_F32x4_FMA(a, b, c) wasm_f32x4_add(wasm_f32x4_mul(b, c), a)
 #define GGML_F32x4_ADD          wasm_f32x4_add
 #define GGML_F32x4_MUL          wasm_f32x4_mul
-#define GGML_F32x4_REDUCE       (wasm_f32x4_extract_lane(x, 0) +      \
+#define GGML_F32x4_REDUCE(x)    (wasm_f32x4_extract_lane(x, 0) +      \
                                 wasm_f32x4_extract_lane(x, 1) +       \
                                 wasm_f32x4_extract_lane(x, 2) +       \
                                 wasm_f32x4_extract_lane(x, 3))        \
